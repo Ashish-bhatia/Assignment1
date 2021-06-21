@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:  Test-Stack-2
+
+# Input Paramters
+Parameters:
+  StackName: 
+    Type: String
+    Default: Test-Stack
+    Description: Main Stack Name
+  ServiceName:
+    Type: String
+    Default: nginx
+    Description: ECS service name
+  ImageUrl:
+    Type: String
+    Default: nginx
+    Description: docker image url
+  ContainerPort:
+    Type: Number
+    Default: 80
+    Description: port number
+  ContainerCpu:
+    Type: Number
+    Default: 256
+    Description: CPU 
+  ContainerMemory:
+    Type: Number
+    Default: 512
+    Description: Memory
+  Path:
+    Type: String
+    Default: "*"
+  Priority:
+    Type: Number
+    Default: 1
+  DesiredCount:
+    Type: Number
+    Default: 2
+    Description: Number of copies
+  Role:
+    Type: String
+    Default: ""
+  Interface:
+    Description: Interface values 
+    Type: String 
+    Default: '' 
+    AllowedValues: 
+      - api 
+      - event
+      - ui
+      - ''
+  Language:
+    Description: Programming Language Value 
+    Type: String 
+    Default: python 
+    AllowedValues: 
+      - python 
+      - go
+      - js
+  Storage:
+    Description: Stogare backend Value 
+    Type: String 
+    Default: '' 
+    AllowedValues: 
+      - dynamodb 
+      - postgres
+      - mysql
+      - ''
+  AppName:
+    Description: AppName in lower case.
+    Type: String 
+
+# Conditions: 
+Conditions:
+  CreateInterfaceApi: 
+    !Equals [!Ref Interface, api]
+  CreateStorageDynamoDb: 
+    !Equals [!Ref Storage, dynamodb]
+  CreateStoragePostgres: 
+    !Equals [!Ref Storage, postgres]
+  CreateInterfaceUi: 
+    !Equals [!Ref Interface, ui]
+  CreateInterfaceEvent: 
+    !Equals [!Ref Interface, event]
+  HasCustomRole: 
+    !Not [!Equals [!Ref 'Role', '']]            
+
+# Task Definition  
+Resources: 
+  AppCodeRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties: 
+      RepositoryDescription: !Ref AppName
+      RepositoryName: !Ref AppName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition 
+    Condition: CreateInterfaceApi
+    Properties: 
+      Family: !Ref 'ServiceName'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities: 
+        - FARGATE 
+      ExecutionRoleArn:
+        Fn::ImportValue: 
+          !Join [':', [!Ref 'StackName', 'ECSTaskExecutionRole']]  
+      TaskRoleArn:
+        Fn::If: 
+          - 'HasCustomRole' 
+          - !Ref 'Role'
+          - !Ref "AWS::NoValue"         
+      ContainerDefinitions:
+        - Name: !Ref 'ServiceName'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Ref 'ImageUrl'
+          PortMappings: 
+            - ContainerPort: !Ref 'ContainerPort'      
+
+# ALB Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup 
+    Condition: CreateInterfaceApi
+    Properties: 
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP 
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip 
+      Name: !Ref 'ServiceName'
+      Port: !Ref 'ContainerPort'
+      Protocol: HTTP 
+      UnhealthyThresholdCount: 2
+      VpcId:                     
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'VPCId']]
+
+# ALB Rule
+  LoadBalancerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: CreateInterfaceApi
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup'       
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: [!Ref 'Path']       
+      ListenerArn: 
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'PublicListener']] 
+      Priority: !Ref 'Priority'                         
+
+# ECS or Fargate Service     
+  Service: 
+    Type: AWS::ECS::Service 
+    Condition: CreateInterfaceApi
+    DependsOn: LoadBalancerRule 
+    Properties: 
+      ServiceName: !Ref 'ServiceName'
+      Cluster: 
+        Fn::ImportValue: 
+          !Join [':', [!Ref 'StackName', 'ClusterName']] 
+      LaunchType: FARGATE 
+      DeploymentConfiguration: 
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: !Ref 'DesiredCount'    
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups: 
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'FargateContainerSecurityGroup']]    
+          Subnets:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnetOne']]                          
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnetTwo']]    
+      TaskDefinition:  !Ref TaskDefinition
+      LoadBalancers:
+        - ContainerName: !Ref 'ServiceName'
+          ContainerPort: !Ref 'ContainerPort'
+          TargetGroupArn: !Ref 'TargetGroup'
+                                                                 
+    # Create S3 bucket enable S3 as website
+  S3StaticUiBucket:
+    Type: AWS::S3::Bucket
+    Condition: CreateInterfaceUi
+    Properties:
+      BucketName:
+        !Join [
+          '-',
+          [
+          'test-bucket-ashish',
+          !Ref AppName
+          ],
+        ]
+      WebsiteConfiguration:
+        ErrorDocument: error.html
+        IndexDocument: index.html
+    
